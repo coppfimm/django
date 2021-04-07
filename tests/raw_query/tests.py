@@ -1,8 +1,8 @@
 from datetime import date
 from decimal import Decimal
 
+from django.core.exceptions import FieldDoesNotExist
 from django.db.models.query import RawQuerySet
-from django.db.models.query_utils import InvalidQuery
 from django.test import TestCase, skipUnlessDBFeature
 
 from .models import (
@@ -180,6 +180,16 @@ class RawQueryTests(TestCase):
         self.assertEqual(len(results), 1)
         self.assertIsInstance(repr(qset), str)
 
+    def test_params_none(self):
+        query = "SELECT * FROM raw_query_author WHERE first_name like 'J%'"
+        qset = Author.objects.raw(query, params=None)
+        self.assertEqual(len(qset), 2)
+
+    def test_escaped_percent(self):
+        query = "SELECT * FROM raw_query_author WHERE first_name like 'J%%'"
+        qset = Author.objects.raw(query)
+        self.assertEqual(len(qset), 2)
+
     @skipUnlessDBFeature('supports_paramstyle_pyformat')
     def test_pyformat_params(self):
         """
@@ -235,7 +245,8 @@ class RawQueryTests(TestCase):
 
     def test_missing_fields_without_PK(self):
         query = "SELECT first_name, dob FROM raw_query_author"
-        with self.assertRaisesMessage(InvalidQuery, 'Raw query must include the primary key'):
+        msg = 'Raw query must include the primary key'
+        with self.assertRaisesMessage(FieldDoesNotExist, msg):
             list(Author.objects.raw(query))
 
     def test_annotations(self):
@@ -318,3 +329,23 @@ class RawQueryTests(TestCase):
         c = Coffee.objects.create(brand='starbucks', price=20.5)
         qs = Coffee.objects.raw("SELECT * FROM raw_query_coffee WHERE price >= %s", params=[Decimal(20)])
         self.assertEqual(list(qs), [c])
+
+    def test_result_caching(self):
+        with self.assertNumQueries(1):
+            books = Book.objects.raw('SELECT * FROM raw_query_book')
+            list(books)
+            list(books)
+
+    def test_iterator(self):
+        with self.assertNumQueries(2):
+            books = Book.objects.raw('SELECT * FROM raw_query_book')
+            list(books.iterator())
+            list(books.iterator())
+
+    def test_bool(self):
+        self.assertIs(bool(Book.objects.raw('SELECT * FROM raw_query_book')), True)
+        self.assertIs(bool(Book.objects.raw('SELECT * FROM raw_query_book WHERE id = 0')), False)
+
+    def test_len(self):
+        self.assertEqual(len(Book.objects.raw('SELECT * FROM raw_query_book')), 4)
+        self.assertEqual(len(Book.objects.raw('SELECT * FROM raw_query_book WHERE id = 0')), 0)

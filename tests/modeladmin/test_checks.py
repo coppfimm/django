@@ -1,8 +1,11 @@
 from django import forms
+from django.contrib import admin
 from django.contrib.admin import BooleanFieldListFilter, SimpleListFilter
 from django.contrib.admin.options import VERTICAL, ModelAdmin, TabularInline
 from django.contrib.admin.sites import AdminSite
 from django.core.checks import Error
+from django.db.models import F, Field, Model
+from django.db.models.functions import Upper
 from django.forms.models import BaseModelFormSet
 from django.test import SimpleTestCase
 
@@ -166,6 +169,19 @@ class FieldsetsCheckTests(CheckTestCase):
             'admin.E012'
         )
 
+    def test_duplicate_fields_in_fieldsets(self):
+        class TestModelAdmin(ModelAdmin):
+            fieldsets = [
+                (None, {'fields': ['name']}),
+                (None, {'fields': ['name']}),
+            ]
+
+        self.assertIsInvalid(
+            TestModelAdmin, ValidationTestModel,
+            "There are duplicate field(s) in 'fieldsets[1][1]'.",
+            'admin.E012'
+        )
+
     def test_fieldsets_with_custom_form_validation(self):
         class BandAdmin(ModelAdmin):
             fieldsets = (('Band', {'fields': ('name',)}),)
@@ -210,11 +226,16 @@ class FormCheckTests(CheckTestCase):
         class TestModelAdmin(ModelAdmin):
             form = FakeForm
 
-        self.assertIsInvalid(
-            TestModelAdmin, ValidationTestModel,
-            "The value of 'form' must inherit from 'BaseModelForm'.",
-            'admin.E016'
-        )
+        class TestModelAdminWithNoForm(ModelAdmin):
+            form = 'not a form'
+
+        for model_admin in (TestModelAdmin, TestModelAdminWithNoForm):
+            with self.subTest(model_admin):
+                self.assertIsInvalid(
+                    model_admin, ValidationTestModel,
+                    "The value of 'form' must inherit from 'BaseModelForm'.",
+                    'admin.E016'
+                )
 
     def test_fieldsets_with_custom_form_validation(self):
 
@@ -479,15 +500,36 @@ class ListDisplayTests(CheckTestCase):
         )
 
     def test_valid_case(self):
+        @admin.display
         def a_callable(obj):
             pass
 
         class TestModelAdmin(ModelAdmin):
+            @admin.display
             def a_method(self, obj):
                 pass
             list_display = ('name', 'decade_published_in', 'a_method', a_callable)
 
         self.assertIsValid(TestModelAdmin, ValidationTestModel)
+
+    def test_valid_field_accessible_via_instance(self):
+        class PositionField(Field):
+            """Custom field accessible only via instance."""
+            def contribute_to_class(self, cls, name):
+                super().contribute_to_class(cls, name)
+                setattr(cls, self.name, self)
+
+            def __get__(self, instance, owner):
+                if instance is None:
+                    raise AttributeError()
+
+        class TestModel(Model):
+            field = PositionField()
+
+        class TestModelAdmin(ModelAdmin):
+            list_display = ('field',)
+
+        self.assertIsValid(TestModelAdmin, TestModel)
 
 
 class ListDisplayLinksCheckTests(CheckTestCase):
@@ -524,10 +566,12 @@ class ListDisplayLinksCheckTests(CheckTestCase):
         )
 
     def test_valid_case(self):
+        @admin.display
         def a_callable(obj):
             pass
 
         class TestModelAdmin(ModelAdmin):
+            @admin.display
             def a_method(self, obj):
                 pass
             list_display = ('name', 'decade_published_in', 'a_method', a_callable)
@@ -583,6 +627,40 @@ class ListFilterTests(CheckTestCase):
             'admin.E112'
         )
 
+    def test_not_list_filter_class(self):
+        class TestModelAdmin(ModelAdmin):
+            list_filter = ['RandomClass']
+
+        self.assertIsInvalid(
+            TestModelAdmin, ValidationTestModel,
+            "The value of 'list_filter[0]' refers to 'RandomClass', which "
+            "does not refer to a Field.",
+            'admin.E116'
+        )
+
+    def test_callable(self):
+        def random_callable():
+            pass
+
+        class TestModelAdmin(ModelAdmin):
+            list_filter = [random_callable]
+
+        self.assertIsInvalid(
+            TestModelAdmin, ValidationTestModel,
+            "The value of 'list_filter[0]' must inherit from 'ListFilter'.",
+            'admin.E113'
+        )
+
+    def test_not_callable(self):
+        class TestModelAdmin(ModelAdmin):
+            list_filter = [[42, 42]]
+
+        self.assertIsInvalid(
+            TestModelAdmin, ValidationTestModel,
+            "The value of 'list_filter[0][1]' must inherit from 'FieldListFilter'.",
+            'admin.E115'
+        )
+
     def test_missing_field(self):
         class TestModelAdmin(ModelAdmin):
             list_filter = ('non_existent_field',)
@@ -604,7 +682,8 @@ class ListFilterTests(CheckTestCase):
         self.assertIsInvalid(
             TestModelAdmin, ValidationTestModel,
             "The value of 'list_filter[0]' must inherit from 'ListFilter'.",
-            'admin.E113')
+            'admin.E113'
+        )
 
     def test_not_filter_again(self):
         class RandomClass:
@@ -637,6 +716,19 @@ class ListFilterTests(CheckTestCase):
             TestModelAdmin, ValidationTestModel,
             "The value of 'list_filter[0][1]' must inherit from 'FieldListFilter'.",
             'admin.E115'
+        )
+
+    def test_list_filter_is_func(self):
+        def get_filter():
+            pass
+
+        class TestModelAdmin(ModelAdmin):
+            list_filter = [get_filter]
+
+        self.assertIsInvalid(
+            TestModelAdmin, ValidationTestModel,
+            "The value of 'list_filter[0]' must inherit from 'ListFilter'.",
+            'admin.E113'
         )
 
     def test_not_associated_with_field_name(self):
@@ -815,6 +907,23 @@ class OrderingCheckTests(CheckTestCase):
 
         self.assertIsValid(TestModelAdmin, ValidationTestModel)
 
+    def test_invalid_expression(self):
+        class TestModelAdmin(ModelAdmin):
+            ordering = (F('nonexistent'), )
+
+        self.assertIsInvalid(
+            TestModelAdmin, ValidationTestModel,
+            "The value of 'ordering[0]' refers to 'nonexistent', which is not "
+            "an attribute of 'modeladmin.ValidationTestModel'.",
+            'admin.E033'
+        )
+
+    def test_valid_expression(self):
+        class TestModelAdmin(ModelAdmin):
+            ordering = (Upper('name'), Upper('band__name').desc())
+
+        self.assertIsValid(TestModelAdmin, ValidationTestModel)
+
 
 class ListSelectRelatedCheckTests(CheckTestCase):
 
@@ -885,6 +994,16 @@ class InlinesCheckTests(CheckTestCase):
             'admin.E103'
         )
 
+    def test_not_correct_inline_field(self):
+        class TestModelAdmin(ModelAdmin):
+            inlines = [42]
+
+        self.assertIsInvalidRegexp(
+            TestModelAdmin, ValidationTestModel,
+            r"'.*\.TestModelAdmin' must inherit from 'InlineModelAdmin'\.",
+            'admin.E104'
+        )
+
     def test_not_model_admin(self):
         class ValidationTestInline:
             pass
@@ -908,7 +1027,8 @@ class InlinesCheckTests(CheckTestCase):
         self.assertIsInvalidRegexp(
             TestModelAdmin, ValidationTestModel,
             r"'.*\.ValidationTestInline' must have a 'model' attribute\.",
-            'admin.E105')
+            'admin.E105'
+        )
 
     def test_invalid_model_type(self):
         class SomethingBad:
@@ -924,6 +1044,32 @@ class InlinesCheckTests(CheckTestCase):
             TestModelAdmin, ValidationTestModel,
             r"The value of '.*\.ValidationTestInline.model' must be a Model\.",
             'admin.E106'
+        )
+
+    def test_invalid_model(self):
+        class ValidationTestInline(TabularInline):
+            model = 'Not a class'
+
+        class TestModelAdmin(ModelAdmin):
+            inlines = [ValidationTestInline]
+
+        self.assertIsInvalidRegexp(
+            TestModelAdmin, ValidationTestModel,
+            r"The value of '.*\.ValidationTestInline.model' must be a Model\.",
+            'admin.E106'
+        )
+
+    def test_invalid_callable(self):
+        def random_obj():
+            pass
+
+        class TestModelAdmin(ModelAdmin):
+            inlines = [random_obj]
+
+        self.assertIsInvalidRegexp(
+            TestModelAdmin, ValidationTestModel,
+            r"'.*\.random_obj' must inherit from 'InlineModelAdmin'\.",
+            'admin.E104'
         )
 
     def test_valid_case(self):
@@ -1066,6 +1212,21 @@ class FormsetCheckTests(CheckTestCase):
             "The value of 'formset' must inherit from 'BaseModelFormSet'.",
             'admin.E206',
             invalid_obj=ValidationTestInline
+        )
+
+    def test_inline_without_formset_class(self):
+        class ValidationTestInlineWithoutFormsetClass(TabularInline):
+            model = ValidationTestInlineModel
+            formset = 'Not a FormSet Class'
+
+        class TestModelAdminWithoutFormsetClass(ModelAdmin):
+            inlines = [ValidationTestInlineWithoutFormsetClass]
+
+        self.assertIsInvalid(
+            TestModelAdminWithoutFormsetClass, ValidationTestModel,
+            "The value of 'formset' must inherit from 'BaseModelFormSet'.",
+            'admin.E206',
+            invalid_obj=ValidationTestInlineWithoutFormsetClass
         )
 
     def test_valid_case(self):
@@ -1256,3 +1417,50 @@ class AutocompleteFieldsTests(CheckTestCase):
         site = AdminSite()
         site.register(User, UserAdmin)
         self.assertIsValid(Admin, ValidationTestModel, admin_site=site)
+
+
+class ActionsCheckTests(CheckTestCase):
+
+    def test_custom_permissions_require_matching_has_method(self):
+        @admin.action(permissions=['custom'])
+        def custom_permission_action(modeladmin, request, queryset):
+            pass
+
+        class BandAdmin(ModelAdmin):
+            actions = (custom_permission_action,)
+
+        self.assertIsInvalid(
+            BandAdmin, Band,
+            'BandAdmin must define a has_custom_permission() method for the '
+            'custom_permission_action action.',
+            id='admin.E129',
+        )
+
+    def test_actions_not_unique(self):
+        @admin.action
+        def action(modeladmin, request, queryset):
+            pass
+
+        class BandAdmin(ModelAdmin):
+            actions = (action, action)
+
+        self.assertIsInvalid(
+            BandAdmin, Band,
+            "__name__ attributes of actions defined in BandAdmin must be "
+            "unique. Name 'action' is not unique.",
+            id='admin.E130',
+        )
+
+    def test_actions_unique(self):
+        @admin.action
+        def action1(modeladmin, request, queryset):
+            pass
+
+        @admin.action
+        def action2(modeladmin, request, queryset):
+            pass
+
+        class BandAdmin(ModelAdmin):
+            actions = (action1, action2)
+
+        self.assertIsValid(BandAdmin, Band)

@@ -8,6 +8,10 @@ class QTests(SimpleTestCase):
         self.assertEqual(q & Q(), q)
         self.assertEqual(Q() & q, q)
 
+        q = Q(x__in={}.keys())
+        self.assertEqual(q & Q(), q)
+        self.assertEqual(Q() & q, q)
+
     def test_combine_and_both_empty(self):
         self.assertEqual(Q() & Q(), Q())
 
@@ -16,8 +20,20 @@ class QTests(SimpleTestCase):
         self.assertEqual(q | Q(), q)
         self.assertEqual(Q() | q, q)
 
+        q = Q(x__in={}.keys())
+        self.assertEqual(q | Q(), q)
+        self.assertEqual(Q() | q, q)
+
     def test_combine_or_both_empty(self):
         self.assertEqual(Q() | Q(), Q())
+
+    def test_combine_not_q_object(self):
+        obj = object()
+        q = Q(x=1)
+        with self.assertRaisesMessage(TypeError, str(obj)):
+            q | obj
+        with self.assertRaisesMessage(TypeError, str(obj)):
+            q & obj
 
     def test_deconstruct(self):
         q = Q(price__gt=F('discounted_price'))
